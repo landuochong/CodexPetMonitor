@@ -171,6 +171,8 @@ private final class CodexStatusScanner: @unchecked Sendable {
 @MainActor
 final class CodexStatusModel: ObservableObject {
     @Published private(set) var detectedState: CodexTaskState = .idle
+    @Published private(set) var runningTaskCount = 0
+    @Published private(set) var waitingTaskCount = 0
     @Published var manualState: CodexTaskState?
     @Published private(set) var lastEvidence = "正在读取 Codex 本地任务事件"
 
@@ -237,6 +239,14 @@ final class CodexStatusModel: ObservableObject {
     }
 
     private func recomputeState(results: [ThreadState]) {
+        if liveStatusConnected {
+            runningTaskCount = liveStatuses.values.filter { $0.state == .working }.count
+            waitingTaskCount = liveStatuses.values.filter { $0.state == .waitingApproval }.count
+        } else {
+            runningTaskCount = results.filter { $0.state == .working }.count
+            waitingTaskCount = results.filter { $0.state == .waitingApproval }.count
+        }
+
         if foregroundThreadID == nil || !results.contains(where: { $0.id == foregroundThreadID }) {
             foregroundThreadID = results.first?.id
         }
@@ -305,6 +315,8 @@ final class CodexStatusModel: ObservableObject {
             },
             "selfTestPassed": selfTestPassed,
             "detectedState": detectedState.rawValue,
+            "runningTaskCount": runningTaskCount,
+            "waitingTaskCount": waitingTaskCount,
             "lastEvidence": lastEvidence,
             "trackedThreadID": trackedThreadID ?? "",
             "stateChangedAt": ISO8601DateFormatter().string(from: stateChangedAt),
@@ -506,10 +518,57 @@ struct PetWindow: View {
     @ObservedObject var model: CodexStatusModel
 
     var body: some View {
-        AnimatedPetSprite(state: model.state)
-            .frame(width: 144, height: 156)
-            .padding(6)
-            .background(Color.clear)
+        ZStack(alignment: .bottomTrailing) {
+            AnimatedPetSprite(state: model.state)
+                .frame(width: 144, height: 156)
+                .padding(6)
+
+            VStack(alignment: .trailing, spacing: 3) {
+                TaskCountBadge(
+                    count: model.runningTaskCount,
+                    systemImage: "play.fill",
+                    color: .green,
+                    accessibilityLabel: "正在执行"
+                )
+                TaskCountBadge(
+                    count: model.waitingTaskCount,
+                    systemImage: "hourglass",
+                    color: .red,
+                    accessibilityLabel: "等待处理"
+                )
+            }
+            .padding(.trailing, 3)
+            .padding(.bottom, 5)
+            .allowsHitTesting(false)
+        }
+        .background(Color.clear)
+    }
+}
+
+private struct TaskCountBadge: View {
+    let count: Int
+    let systemImage: String
+    let color: Color
+    let accessibilityLabel: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: systemImage)
+                .font(.system(size: 8, weight: .black))
+            Text("\(count)")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 6)
+        .frame(height: 18)
+        .background(color.opacity(count > 0 ? 0.94 : 0.55), in: Capsule())
+        .overlay {
+            Capsule().stroke(.white.opacity(0.75), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.35), radius: 1.5, y: 1)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue("\(count)")
     }
 }
 
