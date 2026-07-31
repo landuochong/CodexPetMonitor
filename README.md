@@ -1,18 +1,18 @@
 # CodexPetMonitor
 
-CodexPetMonitor 是一个本地运行的 macOS 桌面宠物。它读取 Codex 在本机记录的任务生命周期事件，把当前状态映射成透明悬浮窗口里的 Chopper 动作。
+CodexPetMonitor 是一个本地运行的 macOS 桌面宠物。它直接订阅 Codex Desktop 的本机任务状态，并用本地事件文件作兼容兜底，把当前状态映射成透明悬浮窗口里的 Chopper 动作。
 
 宠物不会遮挡桌面背景，可以拖动到任意位置，并出现在所有桌面空间。无需辅助功能权限，也不会上传任务内容。
 
 ## 功能
 
-- 自动识别 Codex 的待机、工作中、等待批准和失败状态。
+- 通过 Codex Desktop 本机 IPC 实时识别待机、工作中、等待批准和失败状态。
 - 任意任务等待用户批准时持续奔跑，批准或请求结束后自动停止。
 - 空闲和工作状态保持静止，避免桌面宠物持续晃动。
 - 鼠标悬停时循环跳跃，点击时完成一次跳跃。
 - 透明、无边框、置顶窗口，支持直接拖拽。
 - 菜单栏提供自动检测、手动状态预览和退出操作。
-- 每秒在后台扫描一次，本地诊断信息可用于排查误判。
+- 状态变化由 IPC 即时推送；每秒后台扫描仅用于任务发现和旧版本兼容。
 
 ## 状态与动作
 
@@ -30,7 +30,8 @@ CodexPetMonitor 是一个本地运行的 macOS 桌面宠物。它读取 Codex �
 ## 系统要求
 
 - macOS 13 Ventura 或更高版本。
-- 已安装并使用过 Codex，且本机存在 `~/.codex/state_5.sqlite` 与对应任务事件文件。
+- 已安装并正在运行 Codex Desktop。实时状态通过 `~/.codex/ipc/ipc.sock` 读取。
+- 若 Codex Desktop 不支持实时 IPC，应用会回退到 `~/.codex/state_5.sqlite` 与对应任务事件文件。
 - 从源码构建时需要 Swift 6 和 Xcode Command Line Tools。
 - 系统提供 `/usr/bin/sqlite3`（macOS 默认包含）。
 
@@ -85,13 +86,16 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
 
 ## 工作原理
 
-应用只读取本机 Codex 数据：
+应用只读取本机 Codex 数据，采用“实时状态优先、事件扫描兜底”的两层机制：
 
-1. 从 `~/.codex/state_5.sqlite` 获取最近的未归档任务及事件文件路径。
-2. 从任务 JSONL 事件中识别 `task_started`、`task_complete`、`task_failed`、`turn_aborted` 和工具调用。
-3. 从 `~/.codex/logs_2.sqlite` 判断批准请求是否已经得到响应。
-4. 等待批准状态具有全局优先级；否则持续跟踪最近真正启动的前台任务。
-5. 状态扫描在后台串行队列运行，界面动画留在主线程。
+1. 从 `~/.codex/state_5.sqlite` 获取最近的未归档任务 ID。
+2. 连接 Codex Desktop 的用户级 Unix socket `~/.codex/ipc/ipc.sock`，订阅这些任务的 `thread-stream-state-changed` 广播。
+3. 直接读取 `threadRuntimeStatus.activeFlags`；`waitingOnApproval` 或 `waitingOnUserInput` 会立即映射为等待批准动作。
+4. IPC 断开、Codex 未启动或任务尚未产生实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断。
+5. 任意任务的实时状态为等待批准时具有全局优先级；状态补丁会即时开始或停止奔跑。
+6. IPC 读取和事件扫描均在后台运行，界面动画留在主线程。
+
+旧实现只配对 JSONL 中的工具调用与输出。对于 `functions.exec` 内部已经返回 cell、但嵌套命令仍等待批准的情况，外层调用在 JSONL 中看起来已经完成，因此会漏报。当前版本改为读取 Codex Desktop 自己维护的 `waitingOnApproval` 标记，JSONL 不再承担实时审批判断的主职责。
 
 应用不会联网，不会修改 Codex 的数据库或任务事件。
 
@@ -103,7 +107,7 @@ CodexPetMonitor 不需要辅助功能权限。它仅以只读方式访问 `~/.co
 ~/.codex/codex-pet-monitor-status.json
 ```
 
-诊断文件包含任务 ID、状态、时间戳和状态判断依据，不包含完整提示词或回复正文。若需要分享诊断信息，请仍先检查其中的任务标识是否适合公开。
+诊断文件包含任务 ID、状态、活动标记、时间戳和状态判断依据，不包含完整提示词或回复正文。`liveStatusConnected: true` 表示实时 IPC 已连接；`liveThreadStatuses` 展示 Codex Desktop 返回的精简状态。若需要分享诊断信息，请仍先检查其中的任务标识是否适合公开。
 
 ## 故障排查
 
@@ -130,9 +134,10 @@ jq . "$HOME/.codex/codex-pet-monitor-status.json"
 ### 有批准请求但没有奔跑
 
 - 在菜单栏确认使用的是“自动检测”，而不是手动预览状态。
-- 检查诊断文件中是否出现 `waitingApproval`。
-- 确认 Codex 的 `state_5.sqlite`、`logs_2.sqlite` 和任务事件文件可读。
-- 如果 Codex 更新后更改了本地数据库或事件格式，需要同步更新扫描逻辑。
+- 检查诊断文件中的 `liveStatusConnected` 是否为 `true`。
+- 在 `liveThreadStatuses` 中查找 `activeFlags: ["waitingOnApproval"]`，此时 `detectedState` 应立即变为 `waitingApproval`。
+- 若 IPC 未连接，确认 Codex Desktop 正在运行，并检查 `~/.codex/ipc/ipc.sock` 是否存在；应用会自动每秒重连。
+- 若使用较旧 Codex，只能走兼容兜底，请确认 `state_5.sqlite`、`logs_2.sqlite` 和任务事件文件可读。
 
 ### 反复要求辅助功能权限
 
@@ -163,6 +168,7 @@ CodexPetMonitor/
 ├── Package.swift                       # Swift Package 配置
 ├── Sources/CodexPetMonitor/
 │   ├── CodexPetMonitorApp.swift        # 状态监控、窗口、交互与动画
+│   ├── CodexIPCStatusMonitor.swift      # Codex Desktop 实时状态 IPC 客户端
 │   └── Resources/
 │       └── chopper-spritesheet.png     # v2 动画图集
 └── scripts/build_macos.sh              # release .app 构建脚本
@@ -170,7 +176,7 @@ CodexPetMonitor/
 
 ## 已知限制
 
-- Codex 本地数据库和事件格式不是稳定的公共接口，Codex 更新后可能需要适配。
+- Codex Desktop 本机 IPC 与本地数据库都不是稳定的公共接口，Codex 更新后可能需要适配。
 - 当前只检查最近 20 个未归档且有预览内容的任务。
 - 多个任务并行时，任意等待批准任务都会优先显示；否则跟踪最近真正启动的任务。
 - 当前没有自动启动项，需要用户手动启动或自行添加到“登录项”。

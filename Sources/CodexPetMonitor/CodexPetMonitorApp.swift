@@ -180,7 +180,15 @@ final class CodexStatusModel: ObservableObject {
     private let selfTestPassed = LocalEventReader.selfTest()
     private let scanner = CodexStatusScanner()
     private let scanQueue = DispatchQueue(label: "com.local.codex-pet-monitor.status-scan", qos: .utility)
+    private lazy var liveStatusMonitor = CodexIPCStatusMonitor { [weak self] connected, statuses in
+        Task { @MainActor [weak self] in
+            self?.applyLiveStatuses(connected: connected, statuses: statuses)
+        }
+    }
     private var pollInFlight = false
+    private var liveStatusConnected = false
+    private var liveStatuses: [String: CodexLiveThreadStatus] = [:]
+    private var latestScanResults: [ThreadState] = []
     private var trackedThreadID: String?
     private var foregroundThreadID: String?
     private var stateChangedAt = Date()
@@ -189,6 +197,7 @@ final class CodexStatusModel: ObservableObject {
     var state: CodexTaskState { manualState ?? detectedState }
 
     func start() {
+        liveStatusMonitor.start()
         timer = Timer.publish(every: 1.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in self?.poll() }
@@ -216,6 +225,18 @@ final class CodexStatusModel: ObservableObject {
         }
 
         let results = scanResult.results
+        latestScanResults = results
+        liveStatusMonitor.updateSubscriptions(results.map(\.id))
+        recomputeState(results: results)
+    }
+
+    private func applyLiveStatuses(connected: Bool, statuses: [String: CodexLiveThreadStatus]) {
+        liveStatusConnected = connected
+        liveStatuses = statuses
+        recomputeState(results: latestScanResults)
+    }
+
+    private func recomputeState(results: [ThreadState]) {
         if foregroundThreadID == nil || !results.contains(where: { $0.id == foregroundThreadID }) {
             foregroundThreadID = results.first?.id
         }
@@ -224,11 +245,18 @@ final class CodexStatusModel: ObservableObject {
            newestStart.lastStartedAt > foreground.lastStartedAt {
             foregroundThreadID = newestStart.id
         }
+        let liveWaitingIDs = liveStatuses.compactMap { id, status in
+            status.state == .waitingApproval ? id : nil
+        }
         let waiting = results.filter { $0.state == .waitingApproval }
         let nextState: CodexTaskState
         let nextEvidence: String
         let nextTrackedThreadID: String?
-        if !waiting.isEmpty {
+        if !liveWaitingIDs.isEmpty {
+            nextState = .waitingApproval
+            nextTrackedThreadID = liveWaitingIDs.first
+            nextEvidence = "Codex 实时状态：\(liveWaitingIDs.count) 个任务等待你的批准（持续显示）"
+        } else if !waiting.isEmpty {
             nextState = .waitingApproval
             nextTrackedThreadID = waiting.max(by: { $0.lastEventAt < $1.lastEventAt })?.id
             nextEvidence = "本地事件：\(waiting.count) 个任务等待你的批准（持续显示）"
@@ -236,13 +264,14 @@ final class CodexStatusModel: ObservableObject {
             // Keep following the selected task across database heartbeat updates.
             // A different task takes over only when it emits a genuinely newer
             // task_started event, not merely because a background timestamp moved.
-            nextState = foreground.state
+            nextState = liveStatuses[foreground.id]?.state ?? foreground.state
             nextTrackedThreadID = foreground.id
-            switch foreground.state {
-            case .idle: nextEvidence = "当前任务已结束，进入待机"
-            case .working: nextEvidence = "当前任务正在运行"
-            case .failed: nextEvidence = "当前任务异常结束"
-            case .waitingApproval: nextEvidence = "当前任务等待你的批准"
+            let prefix = liveStatuses[foreground.id] == nil ? "本地事件" : "Codex 实时状态"
+            switch nextState {
+            case .idle: nextEvidence = "\(prefix)：当前任务已结束，进入待机"
+            case .working: nextEvidence = "\(prefix)：当前任务正在运行"
+            case .failed: nextEvidence = "\(prefix)：当前任务异常结束"
+            case .waitingApproval: nextEvidence = "\(prefix)：当前任务等待你的批准"
             }
         } else {
             nextState = .idle
@@ -269,7 +298,11 @@ final class CodexStatusModel: ObservableObject {
 
     private func writeDiagnostics(results: [ThreadState] = []) {
         let payload: [String: Any] = [
-            "dataSource": "codex-local-events",
+            "dataSource": liveStatusConnected ? "codex-desktop-ipc+local-events" : "codex-local-events",
+            "liveStatusConnected": liveStatusConnected,
+            "liveThreadStatuses": liveStatuses.mapValues {
+                ["state": $0.state.rawValue, "activeFlags": $0.activeFlags] as [String: Any]
+            },
             "selfTestPassed": selfTestPassed,
             "detectedState": detectedState.rawValue,
             "lastEvidence": lastEvidence,
