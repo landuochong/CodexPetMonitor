@@ -193,6 +193,8 @@ final class CodexStatusModel: ObservableObject {
     private var latestScanResults: [ThreadState] = []
     private var trackedThreadID: String?
     private var foregroundThreadID: String?
+    private var failureCandidateSince: [String: Date] = [:]
+    private let failureConfirmationDelay: TimeInterval = 3
     private var stateChangedAt = Date()
     private var stateHistory: [[String: String]] = []
 
@@ -239,6 +241,25 @@ final class CodexStatusModel: ObservableObject {
     }
 
     private func recomputeState(results: [ThreadState]) {
+        let now = Date()
+        let resultsByID = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
+        let failureCandidates: Set<String>
+        if liveStatusConnected {
+            failureCandidates = Set(liveStatuses.compactMap { id, status in
+                guard status.reportsSystemError, resultsByID[id]?.state == .failed else { return nil }
+                return id
+            })
+        } else {
+            failureCandidates = Set(results.compactMap { $0.state == .failed ? $0.id : nil })
+        }
+        failureCandidateSince = failureCandidateSince.filter { failureCandidates.contains($0.key) }
+        for id in failureCandidates where failureCandidateSince[id] == nil {
+            failureCandidateSince[id] = now
+        }
+        let confirmedFailureIDs = Set(failureCandidates.filter {
+            now.timeIntervalSince(failureCandidateSince[$0] ?? now) >= failureConfirmationDelay
+        })
+
         if liveStatusConnected {
             runningTaskCount = liveStatuses.values.filter { $0.state == .working }.count
             waitingTaskCount = liveStatuses.values.filter { $0.state == .waitingApproval }.count
@@ -270,11 +291,24 @@ final class CodexStatusModel: ObservableObject {
             nextState = .waitingApproval
             nextTrackedThreadID = waiting.max(by: { $0.lastEventAt < $1.lastEventAt })?.id
             nextEvidence = "本地事件：\(waiting.count) 个任务等待你的批准（持续显示）"
+        } else if let failed = results
+            .filter({ confirmedFailureIDs.contains($0.id) })
+            .max(by: { $0.lastEventAt < $1.lastEventAt }) {
+            nextState = .failed
+            nextTrackedThreadID = failed.id
+            nextEvidence = "已确认：任务持续报告真实错误"
         } else if let foreground = results.first(where: { $0.id == foregroundThreadID }) ?? results.first {
             // Keep following the selected task across database heartbeat updates.
             // A different task takes over only when it emits a genuinely newer
             // task_started event, not merely because a background timestamp moved.
-            nextState = liveStatuses[foreground.id]?.state ?? foreground.state
+            if liveStatuses[foreground.id]?.reportsSystemError == true {
+                // Codex Desktop can retain a top-level systemError after a later
+                // turn has completed. Until the local lifecycle also confirms a
+                // task_failed event, follow the newer local state instead.
+                nextState = foreground.state == .failed ? .idle : foreground.state
+            } else {
+                nextState = liveStatuses[foreground.id]?.state ?? foreground.state
+            }
             nextTrackedThreadID = foreground.id
             let prefix = liveStatuses[foreground.id] == nil ? "本地事件" : "Codex 实时状态"
             switch nextState {
@@ -311,7 +345,12 @@ final class CodexStatusModel: ObservableObject {
             "dataSource": liveStatusConnected ? "codex-desktop-ipc+local-events" : "codex-local-events",
             "liveStatusConnected": liveStatusConnected,
             "liveThreadStatuses": liveStatuses.mapValues {
-                ["state": $0.state.rawValue, "activeFlags": $0.activeFlags] as [String: Any]
+                [
+                    "state": $0.state.rawValue,
+                    "activeFlags": $0.activeFlags,
+                    "statusType": $0.statusType,
+                    "reportsSystemError": $0.reportsSystemError
+                ] as [String: Any]
             },
             "selfTestPassed": selfTestPassed,
             "detectedState": detectedState.rawValue,
@@ -362,6 +401,8 @@ final class LocalEventReader {
         defer { try? FileManager.default.removeItem(at: file) }
         let started = #"{"timestamp":"2026-07-30T03:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#
         let request = #"{"timestamp":"2026-07-30T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":"{\"sandbox_permissions\":\"require_escalated\"}"}}"#
+        let aborted = #"{"timestamp":"2026-07-30T03:00:02Z","type":"event_msg","payload":{"type":"turn_aborted"}}"#
+        let failed = #"{"timestamp":"2026-07-30T03:00:02Z","type":"event_msg","payload":{"type":"task_failed"}}"#
         let completed = #"{"timestamp":"2026-07-30T03:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}"#
         let formatter = ISO8601DateFormatter()
         guard let before = formatter.date(from: "2026-07-30T03:00:00Z")?.timeIntervalSince1970,
@@ -371,7 +412,21 @@ final class LocalEventReader {
             guard scan(at: file.path, approvedAt: before, tailSize: .max, initial: nil).state == .waitingApproval,
                   scan(at: file.path, approvedAt: after, tailSize: .max, initial: nil).state == .working else { return false }
             try (started + "\n" + request + "\n" + completed + "\n").write(to: file, atomically: true, encoding: .utf8)
-            return scan(at: file.path, approvedAt: after, tailSize: .max, initial: nil).state == .idle
+            guard scan(at: file.path, approvedAt: after, tailSize: .max, initial: nil).state == .idle else {
+                return false
+            }
+            try (started + "\n" + aborted + "\n").write(to: file, atomically: true, encoding: .utf8)
+            guard scan(at: file.path, approvedAt: nil, tailSize: .max, initial: nil).state == .idle else {
+                return false
+            }
+            try (started + "\n" + failed + "\n").write(to: file, atomically: true, encoding: .utf8)
+            guard scan(at: file.path, approvedAt: nil, tailSize: .max, initial: nil).state == .failed else {
+                return false
+            }
+            try (started + "\n" + failed + "\n" + completed + "\n").write(
+                to: file, atomically: true, encoding: .utf8
+            )
+            return scan(at: file.path, approvedAt: nil, tailSize: .max, initial: nil).state == .idle
         } catch {
             return false
         }
@@ -401,7 +456,7 @@ final class LocalEventReader {
         let url = URL(fileURLWithPath: path)
         guard let handle = try? FileHandle(forReadingFrom: url),
               let end = try? handle.seekToEnd() else {
-            return ScanResult(state: .failed, evidence: "无法读取最新任务事件", lastEventAt: 0,
+            return ScanResult(state: .idle, evidence: "无法读取最新任务事件", lastEventAt: 0,
                               lastStartedAt: 0, foundLifecycle: false, fileSize: 0)
         }
         defer { try? handle.close() }
@@ -409,7 +464,7 @@ final class LocalEventReader {
         guard (try? handle.seek(toOffset: start)) != nil,
               let data = try? handle.readToEnd(),
               let text = String(data: data, encoding: .utf8) else {
-            return ScanResult(state: .failed, evidence: "无法读取最新任务事件", lastEventAt: 0,
+            return ScanResult(state: .idle, evidence: "无法读取最新任务事件", lastEventAt: 0,
                               lastStartedAt: 0, foundLifecycle: false, fileSize: end)
         }
 
@@ -437,8 +492,15 @@ final class LocalEventReader {
                 foundLifecycle = true
                 lastEventAt = max(lastEventAt, timestamp)
                 active = false
+                failed = false
                 pendingApprovals.removeAll()
-            } else if type == "turn_aborted" || type == "task_failed" {
+            } else if type == "turn_aborted" {
+                foundLifecycle = true
+                lastEventAt = max(lastEventAt, timestamp)
+                active = false
+                failed = false
+                pendingApprovals.removeAll()
+            } else if type == "task_failed" {
                 foundLifecycle = true
                 lastEventAt = max(lastEventAt, timestamp)
                 active = false
@@ -643,6 +705,7 @@ struct AnimatedPetSprite: NSViewRepresentable {
         private var timer: Timer?
         private var state: CodexTaskState = .idle
         private var frame = 0
+        private var failedSequenceIndex = 0
         private var hovered = false
         private var clickJumpActive = false
         private var frameAccumulator: TimeInterval = 0
@@ -662,6 +725,7 @@ struct AnimatedPetSprite: NSViewRepresentable {
             }
             self.state = state
             frame = 0
+            failedSequenceIndex = 0
             frameAccumulator = 0
             lastTickAt = ProcessInfo.processInfo.systemUptime
             displayCurrentFrame()
@@ -705,7 +769,9 @@ struct AnimatedPetSprite: NSViewRepresentable {
             case .task(.waitingApproval):
                 return 0.12
             case .task(.failed):
-                return frame == 7 ? 0.24 : 0.14
+                if frame == 0 { return 0.48 }
+                if frame == 5 { return 0.32 }
+                return 0.18
             }
         }
 
@@ -713,6 +779,7 @@ struct AnimatedPetSprite: NSViewRepresentable {
             guard state != newState else { return }
             state = newState
             frame = 0
+            failedSequenceIndex = 0
             frameAccumulator = 0
             lastTickAt = ProcessInfo.processInfo.systemUptime
             if newState == .waitingApproval || newState == .failed {
@@ -741,7 +808,12 @@ struct AnimatedPetSprite: NSViewRepresentable {
                 // mid-run pause. Keep the six continuous stride poses only.
                 frame = (frame + 1) % 6
             case .task(.failed):
-                frame = (frame + 1) % 8
+                // Descend into the crying pose and retrace the same frames.
+                // This removes the visible snap from the old final frame back
+                // to standing, while keeping a readable pause at both ends.
+                let sequence = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1]
+                failedSequenceIndex = (failedSequenceIndex + 1) % sequence.count
+                frame = sequence[failedSequenceIndex]
             }
             displayCurrentFrame()
         }
@@ -760,6 +832,7 @@ struct AnimatedPetSprite: NSViewRepresentable {
             guard state != .waitingApproval && state != .failed else { return }
             hovered = true
             frame = 0
+            failedSequenceIndex = 0
             frameAccumulator = 0
             displayCurrentFrame()
         }
@@ -768,6 +841,7 @@ struct AnimatedPetSprite: NSViewRepresentable {
             hovered = false
             clickJumpActive = false
             frame = 0
+            failedSequenceIndex = 0
             frameAccumulator = 0
             displayCurrentFrame()
         }
@@ -776,6 +850,7 @@ struct AnimatedPetSprite: NSViewRepresentable {
             guard state != .waitingApproval && state != .failed else { return }
             clickJumpActive = true
             frame = 0
+            failedSequenceIndex = 0
             frameAccumulator = 0
             displayCurrentFrame()
         }

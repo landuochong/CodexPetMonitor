@@ -4,6 +4,9 @@ import Darwin
 struct CodexLiveThreadStatus: Sendable, Equatable {
     let state: CodexTaskState
     let activeFlags: [String]
+    let statusType: String
+
+    var reportsSystemError: Bool { statusType == "systemError" }
 }
 
 /// Reads the live thread status already maintained by Codex Desktop.
@@ -290,7 +293,7 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
         lock.lock()
         let current = statuses[threadID]
         lock.unlock()
-        let type = current?.state == .working || current?.state == .waitingApproval ? "active" : "idle"
+        let type = current?.statusType ?? "notLoaded"
         update(threadID: threadID, statusObject: ["type": type, "activeFlags": flags])
     }
 
@@ -320,7 +323,11 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
             lock.unlock()
             return
         }
-        statuses[threadID] = CodexLiveThreadStatus(state: state, activeFlags: flags)
+        statuses[threadID] = CodexLiveThreadStatus(
+            state: state,
+            activeFlags: flags,
+            statusType: type
+        )
         let snapshot = statuses
         lock.unlock()
         updateHandler(true, snapshot)

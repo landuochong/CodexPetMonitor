@@ -22,7 +22,7 @@ CodexPetMonitor 是一个本地运行的 macOS 桌面宠物。它直接订阅 Co
 | `idle` | 静止待机 |
 | `working` | 切换到静止的工作姿态 |
 | `waitingApproval` | 连续奔跑，直到批准或请求结束 |
-| `failed` | 循环播放失败动作 |
+| `failed` | 确认真实错误持续 3 秒后，平滑循环播放哭泣动作 |
 | 鼠标悬停 | 按原版节奏循环跳跃，落地后短暂停顿 |
 | 鼠标点击 | 完成一次跳跃 |
 
@@ -97,9 +97,10 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
 1. 从 `~/.codex/state_5.sqlite` 获取最近的未归档任务 ID。
 2. 连接 Codex Desktop 的用户级 Unix socket `~/.codex/ipc/ipc.sock`，订阅这些任务的 `thread-stream-state-changed` 广播。
 3. 直接读取 `threadRuntimeStatus.activeFlags`；`waitingOnApproval` 或 `waitingOnUserInput` 会立即映射为等待批准动作。
-4. IPC 断开、Codex 未启动或任务尚未产生实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断。
-5. 任意任务的实时状态为等待批准时具有全局优先级；状态补丁会即时开始或停止奔跑。
-6. IPC 读取和事件扫描均在后台运行，界面动画留在主线程。
+4. 顶层 `systemError` 只有在本地最新生命周期也出现 `task_failed`，并持续至少 3 秒时才映射为失败；已完成任务残留的 `systemError` 和正常的 `turn_aborted` 不会触发哭泣。
+5. IPC 断开、Codex 未启动或任务尚未产生实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断。
+6. 任意任务的实时状态为等待批准时具有全局优先级；状态补丁会即时开始或停止奔跑。
+7. IPC 读取和事件扫描均在后台运行，界面动画留在主线程。
 
 旧实现只配对 JSONL 中的工具调用与输出。对于 `functions.exec` 内部已经返回 cell、但嵌套命令仍等待批准的情况，外层调用在 JSONL 中看起来已经完成，因此会漏报。当前版本改为读取 Codex Desktop 自己维护的 `waitingOnApproval` 标记，JSONL 不再承担实时审批判断的主职责。
 
@@ -113,7 +114,7 @@ CodexPetMonitor 不需要辅助功能权限。它仅以只读方式访问 `~/.co
 ~/.codex/codex-pet-monitor-status.json
 ```
 
-诊断文件包含任务 ID、状态、活动标记、任务统计、时间戳和状态判断依据，不包含完整提示词或回复正文。`liveStatusConnected: true` 表示实时 IPC 已连接；`runningTaskCount` 和 `waitingTaskCount` 对应右下角的绿色、红色数字；`liveThreadStatuses` 展示 Codex Desktop 返回的精简状态。若需要分享诊断信息，请仍先检查其中的任务标识是否适合公开。
+诊断文件包含任务 ID、状态、活动标记、任务统计、时间戳和状态判断依据，不包含完整提示词或回复正文。`liveStatusConnected: true` 表示实时 IPC 已连接；`runningTaskCount` 和 `waitingTaskCount` 对应右下角的绿色、红色数字；`liveThreadStatuses` 展示 Codex Desktop 返回的精简状态，其中 `statusType` 保留原始状态类型，`reportsSystemError` 便于识别 Codex 报告的顶层错误。若需要分享诊断信息，请仍先检查其中的任务标识是否适合公开。
 
 ## 故障排查
 
@@ -148,6 +149,10 @@ jq . "$HOME/.codex/codex-pet-monitor-status.json"
 ### 反复要求辅助功能权限
 
 当前版本不使用辅助功能 API，因此正常运行不应弹出辅助功能授权。若系统设置里仍有旧版 `CodexPetMonitor` 条目，可以关闭或删除该旧条目后重新启动当前版本。
+
+### 宠物偶尔无故哭泣或左右晃动
+
+先检查诊断文件中的 `lastEvidence` 和对应任务的 `statusType`。Codex Desktop 偶尔会在任务后来已完成时保留顶层 `systemError`；当前版本不会单独相信这个残留值，必须同时看到最新 `task_failed` 且状态持续 3 秒才播放哭泣。哭泣动画采用对称的下沉、停顿、回升帧序，不再从侧躺帧直接跳回站立。
 
 ## 自定义宠物素材
 
