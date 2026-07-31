@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+dist/
+monitor-status.json
+AppBundle/CodexPetMonitor.app/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
