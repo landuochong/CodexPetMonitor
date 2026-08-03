@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CodexPetMonitor</AssemblyName>
+    <RootNamespace>CodexPetMonitor.Windows</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.29" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\Sources\CodexPetMonitor\Resources\chopper-spritesheet.png">
+      <Link>Assets\chopper-spritesheet.png</Link>
+    </Resource>
+  </ItemGroup>
+</Project>

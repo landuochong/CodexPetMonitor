@@ -1,6 +1,6 @@
 # CodexPetMonitor
 
-CodexPetMonitor 是一个本地运行的 macOS 桌面宠物。它直接订阅 Codex Desktop 的本机任务状态，并用本地事件文件作兼容兜底，把当前状态映射成透明悬浮窗口里的 Chopper 动作。
+CodexPetMonitor 是一个本地运行的 macOS/Windows 桌面宠物。它读取 Codex Desktop 的本机任务状态，并用本地事件文件作兼容兜底，把当前状态映射成透明悬浮窗口里的 Chopper 动作。
 
 宠物不会遮挡桌面背景，可以拖动到任意位置，并出现在所有桌面空间。无需辅助功能权限，也不会上传任务内容。
 
@@ -35,13 +35,24 @@ CodexPetMonitor 是一个本地运行的 macOS 桌面宠物。它直接订阅 Co
 
 ## 系统要求
 
+### macOS
+
 - macOS 13 Ventura 或更高版本。
 - 已安装并正在运行 Codex Desktop。实时状态通过 `~/.codex/ipc/ipc.sock` 读取。
 - 若 Codex Desktop 不支持实时 IPC，应用会回退到 `~/.codex/state_5.sqlite` 与对应任务事件文件。
 - 从源码构建时需要 Swift 6 和 Xcode Command Line Tools。
 - 系统提供 `/usr/bin/sqlite3`（macOS 默认包含）。
 
+### Windows
+
+- Windows 10 版本 1809 或更高版本，推荐 Windows 11。
+- 已安装并运行 Windows 版 Codex/ChatGPT 桌面应用。OpenAI 已于 2026 年 3 月发布 [Windows 版 Codex 应用](https://openai.com/index/introducing-the-codex-app/)。
+- 从源码构建需要 .NET 8 SDK；默认发布为自包含程序，最终用户不需要预装 .NET Runtime。
+- Windows 端首先尝试 `%USERPROFILE%\.codex\ipc\ipc.sock`，不可用时自动回退到 `%USERPROFILE%\.codex\state_5.sqlite` 与任务 JSONL。
+
 ## 快速开始
+
+### macOS
 
 克隆仓库：
 
@@ -80,6 +91,26 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
   ./scripts/build_macos.sh
 ```
 
+### Windows
+
+在 PowerShell 中构建并安装 x64 版本：
+
+```powershell
+.\windows\build.ps1 -Runtime win-x64
+.\windows\install.ps1 -Runtime win-x64
+```
+
+Windows on ARM 使用：
+
+```powershell
+.\windows\build.ps1 -Runtime win-arm64
+.\windows\install.ps1 -Runtime win-arm64
+```
+
+构建结果位于 `windows\publish\<runtime>\CodexPetMonitor.exe`。安装脚本只写入当前用户的 `%LOCALAPPDATA%\Programs\CodexPetMonitor`，不需要管理员权限。
+
+首次在 Windows 真机验证时，请按 [Windows 测试清单](windows/TESTING.md) 检查透明窗口、四种动画、实时任务统计和批准状态。
+
 ## 使用方法
 
 启动后，宠物默认出现在主屏幕右下角：
@@ -105,6 +136,8 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
 旧实现只配对 JSONL 中的工具调用与输出。对于 `functions.exec` 内部已经返回 cell、但嵌套命令仍等待批准的情况，外层调用在 JSONL 中看起来已经完成，因此会漏报。当前版本改为读取 Codex Desktop 自己维护的 `waitingOnApproval` 标记，JSONL 不再承担实时审批判断的主职责。
 
 应用不会联网，不会修改 Codex 的数据库或任务事件。
+
+Windows 版本保持相同的状态优先级、动画帧序和失败防抖规则。WPF 客户端使用透明置顶窗口和系统托盘；实时 Socket 的协议与 macOS 版本一致。如果某个 Windows Codex 版本没有暴露该 Socket，状态监控会继续使用只读 SQLite/JSONL 扫描，因此等待批准识别可能比实时 IPC 慢约 1 秒。
 
 ## 隐私与权限
 
@@ -175,6 +208,7 @@ Sources/CodexPetMonitor/Resources/chopper-spritesheet.png
 
 ```text
 CodexPetMonitor/
+├── .github/workflows/windows.yml       # Windows 构建验证
 ├── AppBundle/Contents/Info.plist       # macOS 应用包模板
 ├── Package.swift                       # Swift Package 配置
 ├── Sources/CodexPetMonitor/
@@ -182,12 +216,18 @@ CodexPetMonitor/
 │   ├── CodexIPCStatusMonitor.swift      # Codex Desktop 实时状态 IPC 客户端
 │   └── Resources/
 │       └── chopper-spritesheet.png     # v2 动画图集
-└── scripts/build_macos.sh              # release .app 构建脚本
+├── scripts/build_macos.sh              # release .app 构建脚本
+└── windows/
+    ├── CodexPetMonitor.Windows/        # .NET 8 WPF 客户端
+    ├── build.ps1                       # Windows x64/ARM64 发布
+    ├── install.ps1                     # 当前用户安装脚本
+    └── TESTING.md                      # Windows 真机验收清单
 ```
 
 ## 已知限制
 
 - Codex Desktop 本机 IPC 与本地数据库都不是稳定的公共接口，Codex 更新后可能需要适配。
+- Windows Codex 的本机 Socket 并非公开接口；若具体版本没有 `%USERPROFILE%\.codex\ipc\ipc.sock`，应用会使用事件扫描兜底。
 - 当前只检查最近 20 个未归档且有预览内容的任务。
 - 多个任务并行时，任意等待批准任务都会优先显示；否则跟踪最近真正启动的任务。
 - 当前没有自动启动项，需要用户手动启动或自行添加到“登录项”。

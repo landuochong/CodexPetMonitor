@@ -5,3 +5,6 @@ monitor-status.json
 AppBundle/CodexPetMonitor.app/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+windows/**/bin/
+windows/**/obj/
+windows/publish/
