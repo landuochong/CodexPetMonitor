@@ -188,14 +188,14 @@ public partial class MainWindow : Window, IDisposable
         try { DragMove(); } catch (InvalidOperationException) { }
     }
 
-    private void Window_MouseEnter(object sender, MouseEventArgs e)
+    private void Window_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
         if (CurrentState is TaskState.WaitingApproval or TaskState.Failed) return;
         _hovered = true;
         ResetAnimation();
     }
 
-    private void Window_MouseLeave(object sender, MouseEventArgs e)
+    private void Window_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
         _hovered = false;
         _clickJumpActive = false;
