@@ -75,7 +75,7 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
 
         guard let currentClientID else { return }
         for id in removals { sendFollowing(threadID: id, following: false, clientID: currentClientID) }
-        for id in additions { sendFollowing(threadID: id, following: true, clientID: currentClientID) }
+        for id in additions { subscribe(threadID: id, clientID: currentClientID) }
         if !removals.isEmpty { updateHandler(true, snapshot) }
     }
 
@@ -171,14 +171,28 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
         subscribedThreadIDs = desired
         lock.unlock()
 
+        for id in desired { subscribe(threadID: id, clientID: clientID) }
+    }
+
+    private func subscribe(threadID: String, clientID: String) {
+        // Codex Desktop 26.730+ requires the conversation and host on status
+        // requests. It also checks that the client is already following the
+        // conversation, so preserve this ordering.
+        sendFollowing(threadID: threadID, following: true, clientID: clientID)
+        sendStatusRequest(threadID: threadID, clientID: clientID)
+    }
+
+    private func sendStatusRequest(threadID: String, clientID: String) {
         send([
             "type": "broadcast",
             "method": "thread-stream-following-status-requested",
             "sourceClientId": clientID,
             "version": 1,
-            "params": [:]
+            "params": [
+                "conversationId": threadID,
+                "hostId": "local"
+            ]
         ])
-        for id in desired { sendFollowing(threadID: id, following: true, clientID: clientID) }
     }
 
     private func sendFollowing(threadID: String, following: Bool, clientID: String) {

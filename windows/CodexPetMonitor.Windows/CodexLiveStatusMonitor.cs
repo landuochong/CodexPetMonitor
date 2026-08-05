@@ -212,16 +212,10 @@ internal sealed class CodexLiveStatusMonitor : IDisposable
             ids = _desiredIds.ToArray();
         }
         if (clientId is null) return;
-        await SendAsync(new
-        {
-            type = "broadcast",
-            method = "thread-stream-following-status-requested",
-            sourceClientId = clientId,
-            version = 1,
-            @params = new { }
-        });
         foreach (var id in ids)
         {
+            // Codex Desktop 26.730+ only answers a status request for a
+            // conversation this client already follows.
             await SendAsync(new
             {
                 type = "broadcast",
@@ -229,6 +223,14 @@ internal sealed class CodexLiveStatusMonitor : IDisposable
                 sourceClientId = clientId,
                 version = 1,
                 @params = new { conversationId = id, hostId = "local", following = true }
+            });
+            await SendAsync(new
+            {
+                type = "broadcast",
+                method = "thread-stream-following-status-requested",
+                sourceClientId = clientId,
+                version = 1,
+                @params = new { conversationId = id, hostId = "local" }
             });
         }
     }

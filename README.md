@@ -129,7 +129,7 @@ Windows on ARM 使用：
 2. 连接 Codex Desktop 的用户级 Unix socket `~/.codex/ipc/ipc.sock`，订阅这些任务的 `thread-stream-state-changed` 广播。
 3. 直接读取 `threadRuntimeStatus.activeFlags`；`waitingOnApproval` 或 `waitingOnUserInput` 会立即映射为等待批准动作。
 4. 顶层 `systemError` 只有在本地最新生命周期也出现 `task_failed`，并持续至少 3 秒时才映射为失败；已完成任务残留的 `systemError` 和正常的 `turn_aborted` 不会触发哭泣。
-5. IPC 断开、Codex 未启动或任务尚未产生实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断。
+5. IPC 断开、Codex 未启动或连接后尚未收到任何实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断；socket 连接成功本身不会再把任务统计错误清零。
 6. 任意任务的实时状态为等待批准时具有全局优先级；状态补丁会即时开始或停止奔跑。
 7. IPC 读取和事件扫描均在后台运行，界面动画留在主线程。
 
@@ -147,7 +147,7 @@ CodexPetMonitor 不需要辅助功能权限。它仅以只读方式访问 `~/.co
 ~/.codex/codex-pet-monitor-status.json
 ```
 
-诊断文件包含任务 ID、状态、活动标记、任务统计、时间戳和状态判断依据，不包含完整提示词或回复正文。`liveStatusConnected: true` 表示实时 IPC 已连接；`runningTaskCount` 和 `waitingTaskCount` 对应右下角的绿色、红色数字；`liveThreadStatuses` 展示 Codex Desktop 返回的精简状态，其中 `statusType` 保留原始状态类型，`reportsSystemError` 便于识别 Codex 报告的顶层错误。若需要分享诊断信息，请仍先检查其中的任务标识是否适合公开。
+诊断文件包含任务 ID、状态、活动标记、任务统计、时间戳和状态判断依据，不包含完整提示词或回复正文。`liveStatusConnected: true` 只表示实时 IPC socket 已连接；`liveStatusUsable: true` 才表示至少收到过一个可用任务快照。`runningTaskCount` 和 `waitingTaskCount` 对应右下角的绿色、红色数字；`liveThreadStatuses` 展示 Codex Desktop 返回的精简状态，其中 `statusType` 保留原始状态类型，`reportsSystemError` 便于识别 Codex 报告的顶层错误。若需要分享诊断信息，请仍先检查其中的任务标识是否适合公开。
 
 ## 故障排查
 
@@ -174,8 +174,9 @@ jq . "$HOME/.codex/codex-pet-monitor-status.json"
 ### 有批准请求但没有奔跑
 
 - 在菜单栏确认使用的是“自动检测”，而不是手动预览状态。
-- 检查诊断文件中的 `liveStatusConnected` 是否为 `true`。
+- 检查诊断文件中的 `liveStatusConnected` 和 `liveStatusUsable`；前者表示 socket 已连接，后者表示已收到新版 Codex 返回的任务快照。
 - 在 `liveThreadStatuses` 中查找 `activeFlags: ["waitingOnApproval"]`，此时 `detectedState` 应立即变为 `waitingApproval`。
+- 若 `liveStatusConnected` 为 `true` 但 `liveStatusUsable` 为 `false`，应用会继续使用本地事件，右下角统计不应再被清零。
 - 若 IPC 未连接，确认 Codex Desktop 正在运行，并检查 `~/.codex/ipc/ipc.sock` 是否存在；应用会自动每秒重连。
 - 若使用较旧 Codex，只能走兼容兜底，请确认 `state_5.sqlite`、`logs_2.sqlite` 和任务事件文件可读。
 

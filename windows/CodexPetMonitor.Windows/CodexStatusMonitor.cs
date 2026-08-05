@@ -74,20 +74,13 @@ internal sealed class CodexStatusMonitor : IDisposable
 
         var now = DateTimeOffset.Now;
         var localById = local.ToDictionary(x => x.Id, StringComparer.Ordinal);
+        var liveUsable = liveConnected && live.Count > 0;
         HashSet<string> failureCandidates;
-        if (liveConnected)
-        {
-            failureCandidates = live
-                .Where(x => x.Value.ReportsSystemError &&
-                            localById.GetValueOrDefault(x.Key)?.State == TaskState.Failed)
-                .Select(x => x.Key)
-                .ToHashSet(StringComparer.Ordinal);
-        }
-        else
-        {
-            failureCandidates = local.Where(x => x.State == TaskState.Failed)
-                .Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
-        }
+        failureCandidates = local.Where(x =>
+                live.TryGetValue(x.Id, out var status)
+                    ? status.ReportsSystemError && x.State == TaskState.Failed
+                    : x.State == TaskState.Failed)
+            .Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
 
         lock (_gate)
         {
@@ -105,12 +98,11 @@ internal sealed class CodexStatusMonitor : IDisposable
                 .ToHashSet(StringComparer.Ordinal);
         }
 
-        var runningCount = liveConnected
-            ? live.Count(x => x.Value.State == TaskState.Working)
-            : local.Count(x => x.State == TaskState.Working);
-        var waitingCount = liveConnected
-            ? live.Count(x => x.Value.State == TaskState.WaitingApproval)
-            : local.Count(x => x.State == TaskState.WaitingApproval);
+        var effectiveStates = local.Select(x => live.TryGetValue(x.Id, out var status)
+            ? status.State
+            : x.State).ToArray();
+        var runningCount = effectiveStates.Count(x => x == TaskState.Working);
+        var waitingCount = effectiveStates.Count(x => x == TaskState.WaitingApproval);
 
         var newestStarted = local.MaxBy(x => x.LastStartedAt);
         if (_foregroundThreadId is null || !localById.ContainsKey(_foregroundThreadId))
@@ -121,6 +113,11 @@ internal sealed class CodexStatusMonitor : IDisposable
 
         var liveWaiting = live.FirstOrDefault(x => x.Value.State == TaskState.WaitingApproval);
         var localWaiting = local.Where(x => x.State == TaskState.WaitingApproval).MaxBy(x => x.LastEventAt);
+        var working = local
+            .Where(x => live.TryGetValue(x.Id, out var status)
+                ? status.State == TaskState.Working
+                : x.State == TaskState.Working)
+            .MaxBy(x => x.LastStartedAt);
         var foreground = _foregroundThreadId is not null
             ? localById.GetValueOrDefault(_foregroundThreadId)
             : local.FirstOrDefault();
@@ -139,6 +136,12 @@ internal sealed class CodexStatusMonitor : IDisposable
         {
             snapshot = new StatusSnapshot(TaskState.Failed, runningCount, waitingCount,
                 failed.Id, "已确认：任务持续报告真实错误", liveConnected, now);
+        }
+        else if (working is not null)
+        {
+            var prefix = live.ContainsKey(working.Id) ? "Codex 实时状态" : "本地事件";
+            snapshot = new StatusSnapshot(TaskState.Working, runningCount, waitingCount,
+                working.Id, $"{prefix}：{runningCount} 个任务正在运行", liveConnected, now);
         }
         else if (foreground is not null)
         {
@@ -167,7 +170,7 @@ internal sealed class CodexStatusMonitor : IDisposable
                 null, "没有发现 Codex 任务", liveConnected, now);
         }
 
-        WriteDiagnostics(snapshot, local, live);
+        WriteDiagnostics(snapshot, local, live, liveUsable);
         Publish(snapshot);
     }
 
@@ -176,7 +179,8 @@ internal sealed class CodexStatusMonitor : IDisposable
     private static void WriteDiagnostics(
         StatusSnapshot snapshot,
         IReadOnlyList<ThreadState> local,
-        IReadOnlyDictionary<string, LiveThreadStatus> live)
+        IReadOnlyDictionary<string, LiveThreadStatus> live,
+        bool liveUsable)
     {
         try
         {
@@ -188,13 +192,14 @@ internal sealed class CodexStatusMonitor : IDisposable
             var payload = new
             {
                 platform = "windows",
-                dataSource = snapshot.LiveConnected ? "codex-desktop-ipc+local-events" : "codex-local-events",
+                dataSource = liveUsable ? "codex-desktop-ipc+local-events" : "codex-local-events-fallback",
                 detectedState = snapshot.State.ToString(),
                 snapshot.RunningCount,
                 snapshot.WaitingCount,
                 snapshot.TrackedThreadId,
                 snapshot.Evidence,
                 snapshot.LiveConnected,
+                liveStatusUsable = liveUsable,
                 snapshot.UpdatedAt,
                 liveThreadStatuses = live.ToDictionary(x => x.Key, x => new
                 {
