@@ -129,7 +129,7 @@ Windows on ARM 使用：
 2. 连接 Codex Desktop 的用户级 Unix socket `~/.codex/ipc/ipc.sock`，订阅这些任务的 `thread-stream-state-changed` 广播。
 3. 直接读取 `threadRuntimeStatus.activeFlags`；`waitingOnApproval` 或 `waitingOnUserInput` 会立即映射为等待批准动作。
 4. 顶层 `systemError` 只有在本地最新生命周期也出现 `task_failed`，并持续至少 3 秒时才映射为失败；已完成任务残留的 `systemError` 和正常的 `turn_aborted` 不会触发哭泣。
-5. IPC 断开、Codex 未启动或连接后尚未收到任何实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断；socket 连接成功本身不会再把任务统计错误清零。
+5. IPC 断开、Codex 未启动或连接后尚未收到任何实时快照时，从 JSONL 生命周期事件与 `logs_2.sqlite` 进行兼容判断；socket 连接成功本身不会再把任务统计错误清零。应用每 5 秒主动刷新实时快照，且陈旧的 `idle` 快照不会覆盖本地刚检测到的工作或等待状态。
 6. 任意任务的实时状态为等待批准时具有全局优先级；状态补丁会即时开始或停止奔跑。
 7. IPC 读取和事件扫描均在后台运行，界面动画留在主线程。
 

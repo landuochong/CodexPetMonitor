@@ -241,6 +241,17 @@ final class CodexStatusModel: ObservableObject {
         recomputeState(results: latestScanResults)
     }
 
+    private func effectiveState(for result: ThreadState) -> CodexTaskState {
+        guard let live = liveStatuses[result.id] else { return result.state }
+        // Treat active signals as additive. A long-running IPC subscription can
+        // retain an idle snapshot while a newer local lifecycle has already
+        // started, so idle must never cancel local working/waiting evidence.
+        if live.state == .waitingApproval || result.state == .waitingApproval { return .waitingApproval }
+        if live.state == .working || result.state == .working { return .working }
+        if live.reportsSystemError { return result.state == .failed ? .failed : result.state }
+        return result.state
+    }
+
     private func recomputeState(results: [ThreadState]) {
         let now = Date()
         // A connected socket is only a transport signal. New Codex versions
@@ -248,7 +259,7 @@ final class CodexStatusModel: ObservableObject {
         // client. Merge per thread so missing live entries keep using the local
         // lifecycle instead of being incorrectly counted as idle.
         let effectiveStates = results.map { result in
-            (id: result.id, state: liveStatuses[result.id]?.state ?? result.state)
+            (id: result.id, state: effectiveState(for: result))
         }
         let failureCandidates: Set<String>
         failureCandidates = Set(results.compactMap { result in
@@ -281,7 +292,7 @@ final class CodexStatusModel: ObservableObject {
         }
         let waiting = results.filter { $0.state == .waitingApproval }
         let working = results
-            .filter { (liveStatuses[$0.id]?.state ?? $0.state) == .working }
+            .filter { effectiveState(for: $0) == .working }
             .max(by: { $0.lastStartedAt < $1.lastStartedAt })
         let nextState: CodexTaskState
         let nextEvidence: String
@@ -315,7 +326,7 @@ final class CodexStatusModel: ObservableObject {
                 // task_failed event, follow the newer local state instead.
                 nextState = foreground.state == .failed ? .idle : foreground.state
             } else {
-                nextState = liveStatuses[foreground.id]?.state ?? foreground.state
+                nextState = effectiveState(for: foreground)
             }
             nextTrackedThreadID = foreground.id
             let prefix = liveStatuses[foreground.id] == nil ? "本地事件" : "Codex 实时状态"

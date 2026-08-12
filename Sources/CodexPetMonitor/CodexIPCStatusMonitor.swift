@@ -30,6 +30,8 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
     private var desiredThreadIDs = Set<String>()
     private var subscribedThreadIDs = Set<String>()
     private var statuses: [String: CodexLiveThreadStatus] = [:]
+    private var lastStatusRefreshAt: TimeInterval = 0
+    private let statusRefreshInterval: TimeInterval = 5
 
     init(updateHandler: @escaping UpdateHandler) {
         self.updateHandler = updateHandler
@@ -67,6 +69,9 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
         let currentClientID = clientID
         let additions = desired.subtracting(subscribedThreadIDs)
         let removals = subscribedThreadIDs.subtracting(desired)
+        let now = Date().timeIntervalSince1970
+        let shouldRefresh = now - lastStatusRefreshAt >= statusRefreshInterval
+        if shouldRefresh { lastStatusRefreshAt = now }
         subscribedThreadIDs.formUnion(additions)
         subscribedThreadIDs.subtract(removals)
         for id in removals { statuses.removeValue(forKey: id) }
@@ -76,6 +81,11 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
         guard let currentClientID else { return }
         for id in removals { sendFollowing(threadID: id, following: false, clientID: currentClientID) }
         for id in additions { subscribe(threadID: id, clientID: currentClientID) }
+        if shouldRefresh {
+            for id in desired.subtracting(additions) {
+                sendStatusRequest(threadID: id, clientID: currentClientID)
+            }
+        }
         if !removals.isEmpty { updateHandler(true, snapshot) }
     }
 
@@ -137,6 +147,7 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
         clientID = nil
         subscribedThreadIDs.removeAll()
         statuses.removeAll()
+        lastStatusRefreshAt = 0
         lock.unlock()
         updateHandler(true, [:])
     }
@@ -169,6 +180,7 @@ final class CodexIPCStatusMonitor: @unchecked Sendable {
         self.clientID = clientID
         let desired = desiredThreadIDs
         subscribedThreadIDs = desired
+        lastStatusRefreshAt = Date().timeIntervalSince1970
         lock.unlock()
 
         for id in desired { subscribe(threadID: id, clientID: clientID) }

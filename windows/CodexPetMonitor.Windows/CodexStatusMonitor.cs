@@ -98,9 +98,19 @@ internal sealed class CodexStatusMonitor : IDisposable
                 .ToHashSet(StringComparer.Ordinal);
         }
 
-        var effectiveStates = local.Select(x => live.TryGetValue(x.Id, out var status)
-            ? status.State
-            : x.State).ToArray();
+        TaskState EffectiveState(ThreadState thread)
+        {
+            if (!live.TryGetValue(thread.Id, out var status)) return thread.State;
+            if (status.State == TaskState.WaitingApproval || thread.State == TaskState.WaitingApproval)
+                return TaskState.WaitingApproval;
+            if (status.State == TaskState.Working || thread.State == TaskState.Working)
+                return TaskState.Working;
+            if (status.ReportsSystemError)
+                return thread.State == TaskState.Failed ? TaskState.Failed : thread.State;
+            return thread.State;
+        }
+
+        var effectiveStates = local.Select(EffectiveState).ToArray();
         var runningCount = effectiveStates.Count(x => x == TaskState.Working);
         var waitingCount = effectiveStates.Count(x => x == TaskState.WaitingApproval);
 
@@ -114,9 +124,7 @@ internal sealed class CodexStatusMonitor : IDisposable
         var liveWaiting = live.FirstOrDefault(x => x.Value.State == TaskState.WaitingApproval);
         var localWaiting = local.Where(x => x.State == TaskState.WaitingApproval).MaxBy(x => x.LastEventAt);
         var working = local
-            .Where(x => live.TryGetValue(x.Id, out var status)
-                ? status.State == TaskState.Working
-                : x.State == TaskState.Working)
+            .Where(x => EffectiveState(x) == TaskState.Working)
             .MaxBy(x => x.LastStartedAt);
         var foreground = _foregroundThreadId is not null
             ? localById.GetValueOrDefault(_foregroundThreadId)
@@ -150,9 +158,7 @@ internal sealed class CodexStatusMonitor : IDisposable
             if (liveConnected && live.TryGetValue(foreground.Id, out var liveStatus))
             {
                 prefix = "Codex 实时状态";
-                state = liveStatus.ReportsSystemError
-                    ? foreground.State == TaskState.Failed ? TaskState.Idle : foreground.State
-                    : liveStatus.State;
+                state = EffectiveState(foreground);
             }
             var evidence = state switch
             {
